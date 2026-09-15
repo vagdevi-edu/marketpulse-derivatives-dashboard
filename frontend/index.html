@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>MarketPulse — Equity &amp; Derivatives Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --navy: #0b1f3a;
+    --navy2: #13294f;
+    --accent: #4f8ef0;
+    --green: #2ecc71;
+    --red: #ff5c5c;
+    --text: #e7ecf5;
+    --muted: #9fb0c8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(180deg, var(--navy) 0%, #0d1730 100%);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .layout { display: grid; grid-template-columns: 260px 1fr; gap: 20px; }
+  @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .watchlist-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 8px; border-radius: 8px; cursor: pointer;
+    margin-bottom: 4px; font-size: 14px;
+  }
+  .watchlist-row:hover { background: rgba(255,255,255,0.06); }
+  .watchlist-row.active { background: rgba(79,142,240,0.18); border: 1px solid var(--accent); }
+  .sym { font-weight: 600; }
+  .chg-up { color: var(--green); }
+  .chg-down { color: var(--red); }
+
+  .add-row { display: flex; gap: 6px; margin-top: 12px; }
+  .add-row input {
+    flex: 1; padding: 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.03); color: var(--text); font-size: 13px;
+  }
+  .add-row button, .refresh-btn {
+    padding: 8px 12px; border-radius: 6px; border: none;
+    background: var(--accent); color: white; font-size: 13px; cursor: pointer;
+  }
+
+  .cards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+  .card {
+    flex: 1; min-width: 160px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px; padding: 14px 16px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: right; }
+  th { color: var(--muted); font-weight: 600; border-bottom: 1px solid rgba(255,255,255,0.12); }
+  td:first-child, th:first-child { text-align: left; }
+  tr.atm { background: rgba(79,142,240,0.12); }
+  tbody tr:hover { background: rgba(255,255,255,0.04); }
+
+  .section-title { font-size: 15px; font-weight: 600; margin: 0 0 12px; display: flex; justify-content: space-between; align-items: center; }
+  .chart-wrap { height: 260px; margin-top: 8px; }
+  .footer-note { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.08); color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>📈 MarketPulse</h1>
+<div class="sub">Equity &amp; derivatives dashboard — live quotes, options chain, and Put-Call Ratio (PCR) sentiment</div>
+
+<div class="layout">
+  <div class="panel">
+    <div class="section-title">Watchlist</div>
+    <div id="watchlist"></div>
+    <div class="add-row">
+      <input id="newSymbol" placeholder="e.g. TCS.NS" />
+      <button onclick="addSymbol()">Add</button>
+    </div>
+    <div class="footer-note" id="dataSource"></div>
+  </div>
+
+  <div>
+    <div class="cards" id="priceCards"></div>
+
+    <div class="panel">
+      <div class="section-title">
+        <span id="chainTitle">Options Chain</span>
+        <span class="badge" id="pcrBadge">PCR —</span>
+      </div>
+      <div class="chart-wrap"><canvas id="oiChart"></canvas></div>
+      <div style="overflow-x:auto; margin-top:16px;">
+        <table id="chainTable">
+          <thead>
+            <tr><th>Strike</th><th>Call OI</th><th>Call IV%</th><th>Put OI</th><th>Put IV%</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = "http://localhost:8000/api";
+let currentSymbol = null;
+let oiChart = null;
+
+async function loadWatchlist() {
+  const res = await fetch(`${API}/watchlist`);
+  const data = await res.json();
+  const container = document.getElementById("watchlist");
+  container.innerHTML = "";
+  data.quotes.forEach(q => {
+    const row = document.createElement("div");
+    row.className = "watchlist-row" + (q.symbol === currentSymbol ? " active" : "");
+    const chgClass = q.change_pct >= 0 ? "chg-up" : "chg-down";
+    const arrow = q.change_pct >= 0 ? "▲" : "▼";
+    row.innerHTML = `<span class="sym">${q.symbol}</span><span class="${chgClass}">${arrow} ${Math.abs(q.change_pct)}%</span>`;
+    row.onclick = () => selectSymbol(q.symbol);
+    container.appendChild(row);
+  });
+  if (!currentSymbol && data.symbols.length) selectSymbol(data.symbols[0]);
+}
+
+async function addSymbol() {
+  const input = document.getElementById("newSymbol");
+  const sym = input.value.trim();
+  if (!sym) return;
+  await fetch(`${API}/watchlist/${sym}`, { method: "POST" });
+  input.value = "";
+  loadWatchlist();
+}
+
+async function selectSymbol(symbol) {
+  currentSymbol = symbol;
+  loadWatchlist();
+  await Promise.all([loadPriceCards(symbol), loadOptionsChain(symbol)]);
+}
+
+async function loadPriceCards(symbol) {
+  const res = await fetch(`${API}/price/${symbol}`);
+  const q = await res.json();
+  document.getElementById("dataSource").textContent =
+    q.source === "mock" ? "Showing synthetic demo data (no live feed reachable)" : "Live via yfinance";
+  const cards = document.getElementById("priceCards");
+  const chgClass = q.change_pct >= 0 ? "chg-up" : "chg-down";
+  cards.innerHTML = `
+    <div class="card"><div class="label">${q.symbol}</div><div class="value">${q.price}</div></div>
+    <div class="card"><div class="label">Change</div><div class="value ${chgClass}">${q.change_pct}%</div></div>
+  `;
+}
+
+async function loadOptionsChain(symbol) {
+  const res = await fetch(`${API}/options/${symbol}`);
+  const data = await res.json();
+  document.getElementById("chainTitle").textContent = `Options Chain — ${data.symbol} (exp. ${data.expiry})`;
+  document.getElementById("pcrBadge").textContent = `PCR ${data.put_call_ratio ?? "—"}`;
+
+  const tbody = document.querySelector("#chainTable tbody");
+  tbody.innerHTML = "";
+  data.rows.forEach(r => {
+    const tr = document.createElement("tr");
+    if (Math.abs(r.strike - data.spot) < (data.spot * 0.01)) tr.classList.add("atm");
+    tr.innerHTML = `<td>${r.strike}</td><td>${r.call_oi}</td><td>${r.call_iv}</td><td>${r.put_oi}</td><td>${r.put_iv}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const ctx = document.getElementById("oiChart").getContext("2d");
+  if (oiChart) oiChart.destroy();
+  oiChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: data.rows.map(r => r.strike),
+      datasets: [
+        { label: "Call OI", data: data.rows.map(r => r.call_oi), backgroundColor: "#4f8ef0" },
+        { label: "Put OI", data: data.rows.map(r => r.put_oi), backgroundColor: "#ff5c5c" },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: "#e7ecf5" } } },
+      scales: {
+        x: { ticks: { color: "#9fb0c8" }, grid: { color: "rgba(255,255,255,0.05)" } },
+        y: { ticks: { color: "#9fb0c8" }, grid: { color: "rgba(255,255,255,0.05)" } },
+      },
+    },
+  });
+}
+
+loadWatchlist();
+setInterval(loadWatchlist, 30000);
+</script>
+</body>
+</html>
